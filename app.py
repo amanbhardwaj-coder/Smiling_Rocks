@@ -172,31 +172,90 @@ def load_image_map(path_or_file):
 # ============================================================================
 # MFG PARSER — turns a workbook into a list of item dicts
 # ============================================================================
+def _norm_header(x):
+    """Normalize a header cell for matching: 'D. Pcs' / 'D.Pcs' / ' D Pcs ' -> 'dpcs'."""
+    return re.sub(r'[^a-z0-9]+', '', _txt(x).lower())
+
+# Canonical field -> any of these normalized header strings.
+# Add aliases here if a future MFG layout uses slightly different wording.
+_HEADER_ALIASES = {
+    'no':         ('no',),
+    'style':      ('styleno',),
+    'desc':       ('description',),
+    'pcs':        ('dpcs', 'dpc'),
+    'size':       ('dsize',),
+    'ct':         ('gmcts', 'gmct'),
+    'dc':         ('dc',),
+    'srp':        ('srp',),
+    'remark':     ('remark',),
+    'collection': ('collection',),
+}
+
+def _find_header(rows, max_scan=80):
+    """Scan the first `max_scan` rows for the header. Returns (header_row_idx, idx_map) or (None, None).
+
+    Header row must contain 'Style No', 'Description', 'D. Pcs' (or 'D.Pcs'),
+    and 'Gm/Cts' (or 'Gm.Cts'). Returns a dict mapping field -> column index.
+    """
+    for r in range(min(max_scan, len(rows))):
+        normalized = [_norm_header(c) for c in rows[r]]
+        # Required fields must all be present in this row
+        if not all(any(a in normalized for a in _HEADER_ALIASES[f])
+                   for f in ('style', 'desc', 'pcs', 'ct')):
+            continue
+        idx = {}
+        for field, aliases in _HEADER_ALIASES.items():
+            for a in aliases:
+                if a in normalized:
+                    idx[field] = normalized.index(a)
+                    break
+        return r, idx
+    return None, None
+
 def extract(path_or_file):
-    """Parse one MFG .xlsx (path or file-like) into a list of item dicts."""
+    """Parse one MFG .xlsx (path or file-like) into a list of item dicts.
+
+    Auto-detects each sheet's header row and column positions so it works
+    across MFG layout variants (extra leading column, renamed Remark vs
+    collection column, etc.).
+    """
     wb = load_workbook(path_or_file, read_only=True, data_only=True)
     items = []
     for sheet_name in wb.sheetnames:
         purity = '18K' if '18K' in sheet_name.upper() else '14K'
-        cur = None
-        for row in wb[sheet_name].iter_rows(values_only=True):
-            row = list(row)
-            first = _txt(row[0]) if len(row) > 0 else ''
-            style = _txt(row[2]) if len(row) > 2 else ''
-            desc  = _txt(row[3]) if len(row) > 3 else ''
+        rows = [list(r) for r in wb[sheet_name].iter_rows(values_only=True)]
 
-            # New item header: numbered + SR-style SKU in col 2
+        header_row, idx = _find_header(rows)
+        if header_row is None:
+            continue  # sheet doesn't look like an MFG quotation, skip silently
+
+        def cell(row, field):
+            j = idx.get(field)
+            return row[j] if (j is not None and j < len(row)) else None
+
+        cur = None
+        for r in range(header_row + 1, len(rows)):
+            row = rows[r]
+            first = _txt(cell(row, 'no'))
+            style = _txt(cell(row, 'style'))
+            desc  = _txt(cell(row, 'desc'))
+
+            # New item header: numbered + SR-style SKU in the Style column
             if first.replace('.0', '').isdigit() and style.upper().startswith('SR'):
                 if cur:
                     items.append(cur)
                 m = re.search(r'\bSR[A-Z]+-\d+[A-Z0-9]*\b', style.upper())
+                # Use Remark if populated, else fall back to collection column
+                # (newer MFG files put the category there instead).
+                remark_val     = _txt(cell(row, 'remark'))
+                collection_val = _txt(cell(row, 'collection'))
                 cur = {
                     'sheet': sheet_name, 'purity': purity,
                     'base': (m.group(0) if m else style),
                     'jtype': '',
-                    'remark': _txt(row[21]) if len(row) > 21 else '',
-                    'dc':  _num(row[19]) if len(row) > 19 else 0,
-                    'srp': _num(row[20]) if len(row) > 20 else 0,
+                    'remark': remark_val or collection_val,
+                    'dc':  _num(cell(row, 'dc')),
+                    'srp': _num(cell(row, 'srp')),
                     'total_dia': 0.0,
                     'centers': [], 'sides': [],
                 }
@@ -209,8 +268,8 @@ def extract(path_or_file):
                     cur['jtype'] = cand.title()
 
             # Stone rows
-            pcs   = _num(row[4]) if len(row) > 4 else 0
-            carat = _num(row[6]) if len(row) > 6 else 0
+            pcs   = _num(cell(row, 'pcs'))
+            carat = _num(cell(row, 'ct'))
             tk = _toks(desc)
             if (tk[:1] == ['CS'] or any(c in SHAPE_MAP for c in tk)) and pcs > 0 and carat > 0:
                 rec = {

@@ -222,7 +222,16 @@ def extract(path_or_file):
     wb = load_workbook(path_or_file, read_only=True, data_only=True)
     items = []
     for sheet_name in wb.sheetnames:
-        purity = '18K' if '18K' in sheet_name.upper() else '14K'
+        # MFG workbooks may name sheets as `14`, `14 `, `14K`, `18`, `18K`, etc.
+        # The earlier logic checked only for `18K`, so a sheet named just `18`
+        # was incorrectly treated as 14K. Normalize first, then detect purity.
+        sheet_key = re.sub(r'[^0-9A-Z]+', '', _txt(sheet_name).upper())
+        if sheet_key.startswith('18'):
+            purity = '18K'
+        elif sheet_key.startswith('14'):
+            purity = '14K'
+        else:
+            purity = '18K' if '18' in sheet_key else '14K'
         rows = [list(r) for r in wb[sheet_name].iter_rows(values_only=True)]
 
         header_row, idx = _find_header(rows)
@@ -240,10 +249,16 @@ def extract(path_or_file):
             style = _txt(cell(row, 'style'))
             desc  = _txt(cell(row, 'desc'))
 
-            # New item header: numbered + SR-style SKU in the Style column
-            if first.replace('.0', '').isdigit() and style.upper().startswith('SR'):
+            # New item header: numbered row. Some MFG files put the real
+            # SR stock number on this row (Pricing 2), while others put a
+            # P.O. value here and the SR stock number 1-2 rows below
+            # (Pricing 3). Start the item on the numbered row in both cases
+            # and fill `base` as soon as an SR-style SKU appears.
+            if first.replace('.0', '').isdigit():
                 if cur:
-                    items.append(cur)
+                    # Only keep completed items where we found a real SR SKU.
+                    if cur.get('base'):
+                        items.append(cur)
                 m = re.search(r'\bSR[A-Z]+-\d+[A-Z0-9]*\b', style.upper())
                 # Use Remark if populated, else fall back to collection column
                 # (newer MFG files put the category there instead).
@@ -251,7 +266,7 @@ def extract(path_or_file):
                 collection_val = _txt(cell(row, 'collection'))
                 cur = {
                     'sheet': sheet_name, 'purity': purity,
-                    'base': (m.group(0) if m else style),
+                    'base': (m.group(0) if m else ''),
                     'jtype': '',
                     'remark': remark_val or collection_val,
                     'dc':  _num(cell(row, 'dc')),
@@ -261,6 +276,12 @@ def extract(path_or_file):
                 }
             if cur is None:
                 continue
+
+            # In P.O.-style sheets, the real stock number is on a later detail row.
+            if not cur.get('base'):
+                m = re.search(r'\bSR[A-Z]+-\d+[A-Z0-9]*\b', style.upper())
+                if m:
+                    cur['base'] = m.group(0)
 
             # Jewelry type appears in the style col on a detail line
             for cand in (style, desc):
@@ -285,7 +306,8 @@ def extract(path_or_file):
                     cur['total_dia'] = _num(row[j + 1])
 
         if cur:
-            items.append(cur)
+            if cur.get('base'):
+                items.append(cur)
             cur = None
     return items
 

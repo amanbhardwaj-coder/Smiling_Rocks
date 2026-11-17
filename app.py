@@ -128,10 +128,10 @@ def _fmt2_fixed(v):
 # ============================================================================
 # IMAGE-LIST LOADER
 # ============================================================================
-# Accept ONLY single-letter color + index codes: W1, Y1, R1, W2, Y2, ...
+# Accept color + index codes, including explicit combinations such as WY1.
 # Anything else (WG/YG/RG metal codes, LS/LF loose-stone, digits-only,
-# "WY1", "W1 (1)") is skipped on purpose.
-_IMG_CODE_RE = re.compile(r'^([WYR])(\d+)$', re.I)
+# "W1 (1)") is skipped on purpose.
+_IMG_CODE_RE = re.compile(r'^([WYR]{1,3})(\d+)$', re.I)
 
 def load_image_map(path_or_file):
     """Read a one-column image-filename list and build {(base, colorLetter): [urls by index]}.
@@ -187,6 +187,12 @@ _HEADER_ALIASES = {
     'ct':         ('gmcts', 'gmct'),
     'dc':         ('dc',),
     'srp':        ('srp',),
+    '14kdc':      ('14kdc',),
+    '18kdc':      ('18kdc',),
+    '14ksrp':     ('14ksrp',),
+    '18ksrp':     ('18ksrp',),
+    'default_color': ('defaultmetalcolor',),
+    'variation':  ('variation', 'variations'),
     'remark':     ('remark',),
     'collection': ('collection',),
 }
@@ -211,6 +217,36 @@ def _find_header(rows, max_scan=80):
                     break
         return r, idx
     return None, None
+
+def _metal_color(value):
+    """Canonical stock suffix, including explicit two/three tone combinations."""
+    text = _txt(value).upper()
+    if not text:
+        return 'W'
+    compact = re.sub(r'[^A-Z]', '', text)
+    aliases = {'WG': 'W', 'YG': 'Y', 'RG': 'R', 'W': 'W', 'Y': 'Y', 'R': 'R'}
+    if compact in aliases:
+        return aliases[compact]
+    if re.fullmatch(r'[WYR]{2,3}', compact):
+        return ''.join(dict.fromkeys(compact))
+    colors = re.findall(r'WHITE|YELLOW|ROSE|WG|YG|RG', text)
+    if colors:
+        return ''.join(dict.fromkeys(c[0] for c in colors))
+    raise ValueError(f"Unrecognized DEFAULT METAL COLOR {value!r}; specify colors (e.g. WY for two tone).")
+
+
+def _metal_name(purity, color):
+    names = '/'.join(COLOR_NAME[c] for c in color)
+    return f"{purity} {names} Gold" + (' Two Tone' if len(color) == 2 else ' Three Tone' if len(color) == 3 else '')
+
+
+def _item_colors(item):
+    default = item.get('default_color', 'W')
+    # An explicit combination represents the item's two/three tone metal.
+    if len(default) > 1 or item.get('variation', '').upper() in ('NO', 'N', 'FALSE', '0'):
+        return (default,)
+    return ('W', 'Y', 'R')
+
 
 def extract(path_or_file):
     """Parse one MFG .xlsx (path or file-like) into a list of item dicts.
@@ -242,6 +278,20 @@ def extract(path_or_file):
             j = idx.get(field)
             return row[j] if (j is not None and j < len(row)) else None
 
+        combined = all(f in idx for f in ('14kdc', '18kdc', '14ksrp', '18ksrp'))
+        if ('14kdc' in idx or '18kdc' in idx) and not combined:
+            raise ValueError(f'{sheet_name}: combined pricing requires 14KDC, 18KDC, 14KSRP and 18KSRP.')
+
+        def finish(item):
+            if not item or not item.get('base'):
+                return
+            if combined:
+                for karat in ('14K', '18K'):
+                    items.append(dict(item, purity=karat, dc=item['prices'][karat][0],
+                                      srp=item['prices'][karat][1]))
+            else:
+                items.append(item)
+
         cur = None
         for r in range(header_row + 1, len(rows)):
             row = rows[r]
@@ -257,15 +307,19 @@ def extract(path_or_file):
             if first.replace('.0', '').isdigit():
                 if cur:
                     # Only keep completed items where we found a real SR SKU.
-                    if cur.get('base'):
-                        items.append(cur)
+                    finish(cur)
                 m = re.search(r'\bSR[A-Z]+-\d+[A-Z0-9]*\b', style.upper())
                 # Use Remark if populated, else fall back to collection column
                 # (newer MFG files put the category there instead).
                 remark_val     = _txt(cell(row, 'remark'))
                 collection_val = _txt(cell(row, 'collection'))
                 cur = {
-                    'sheet': sheet_name, 'purity': purity,
+                    'sheet': sheet_name, 'purity': purity, 'combined': combined,
+                    'default_color': _metal_color(cell(row, 'default_color')),
+                    'variation': _txt(cell(row, 'variation')),
+                    'prices': {k: (_num(cell(row, k.lower() + 'dc')),
+                                   _num(cell(row, k.lower() + 'srp')))
+                               for k in ('14K', '18K')},
                     'base': (m.group(0) if m else ''),
                     'jtype': '',
                     'remark': remark_val or collection_val,
@@ -306,9 +360,9 @@ def extract(path_or_file):
                     cur['total_dia'] = _num(row[j + 1])
 
         if cur:
-            if cur.get('base'):
-                items.append(cur)
+            finish(cur)
             cur = None
+    wb.close()
     return items
 
 
@@ -371,17 +425,22 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
     # Group by base; collect purities + per-purity snapshot
     by_base = {}
     for it in items:
-        by_base.setdefault(it['base'], {})[it['purity']] = it
+        purs = by_base.setdefault(it['base'], {})
+        previous = purs.get(it['purity'])
+        if previous is None or it.get('combined') or not previous.get('combined'):
+            purs[it['purity']] = it
 
     out, unknown = [], set()
     for base in by_base:
         purs = by_base[base]
-        # Available Metals: alphabetical color order (Rose, White, Yellow) within each purity
-        _ORD = ('R', 'W', 'Y')
+        # Combined-source snapshots take priority for each matching style/purity.
+        master_purity = '14K' if '14K' in purs else min(purs)
+        master_color = purs[master_purity].get('default_color', 'W')
+        master_stock = f"{base}-{master_purity}{master_color}"
         avail = '#'.join(
-            f"{p} {COLOR_NAME[C]} Gold"
-            for p in sorted(purs.keys(), key=lambda x: int(x[:2]))
-            for C in _ORD
+            _metal_name(p, C)
+            for p in sorted(purs)
+            for C in sorted(_item_colors(purs[p]))
         )
 
         for purity, it in sorted(purs.items()):
@@ -408,9 +467,8 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
             comment = _build_comment(it['centers'], it['sides'])
             tags = collection if (cf14 == 'Fashion' or not cf14) else f"{collection},{cf14}"
 
-            for C in ('W', 'Y', 'R'):
-                color = COLOR_NAME[C]
-                metal = f"{purity} {color} Gold"
+            for C in _item_colors(it):
+                metal = _metal_name(purity, C)
                 wt = _fmt2_fixed(weight)                # 2dp Weight w/ trailing zero
                 title = re.sub(r'\s+', ' ', f"{collection} {style} {wt}CT {metal} {subcat}").strip()
                 urls = image_map.get((base.upper(), C), [])[:MAX_IMAGES]
@@ -418,7 +476,7 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
                            for i in range(1, MAX_IMAGES + 1)}
 
                 out.append({
-                    'Master Stock':            f"{base}-14KW",
+                    'Master Stock':            master_stock,
                     'Stock Number':            f"{base}-{purity}{C}",
                     'Jewelry Sub-Category':    subcat,
                     'Jewelry Style':           style,
@@ -482,7 +540,7 @@ def _run_cli(argv=None):
     df, unknown = convert(a.inputs, imap, collection=a.collection)
     df.to_csv(a.output, index=False)
     print(f"Wrote {len(df)} rows -> {a.output}")
-    n_styles = df['Stock Number'].str.replace(r'-..K[WYR]$', '', regex=True).nunique()
+    n_styles = df['Stock Number'].str.replace(r'-..K[WYR]+$', '', regex=True).nunique()
     print(f"Unique styles: {n_styles}")
     print(f"Rows with at least one image: {(df['Image Url 1'] != '').sum()}/{len(df)}")
     if unknown:
@@ -613,7 +671,7 @@ if _running_under_streamlit():
         st.subheader("Results")
 
         # stats cards
-        unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]$", "", regex=True).nunique()
+        unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]+$", "", regex=True).nunique()
         rows_with_img = (df["Image Url 1"] != "").sum()
         cols = st.columns(4)
         cols[0].metric("Rows", f"{len(df):,}")
@@ -648,7 +706,7 @@ if _running_under_streamlit():
             missing_imgs = df[df["Image Url 1"] == ""]
             if not missing_imgs.empty:
                 missing_styles = sorted(
-                    set(missing_imgs["Stock Number"].str.replace(r"-..K[WYR]$", "", regex=True))
+                    set(missing_imgs["Stock Number"].str.replace(r"-..K[WYR]+$", "", regex=True))
                 )
                 with st.expander(f"📷 {len(missing_styles)} style(s) have no image in the list"):
                     st.code(", ".join(missing_styles))
@@ -659,7 +717,7 @@ if _running_under_streamlit():
                     "(WG/YG/RG, LS, LF, digits-only, malformed)"
                 ):
                     st.caption(
-                        "Only W1/Y1/R1-style codes are accepted. Examples of "
+                        "W1/Y1/R1 and two tone codes such as WY1 are accepted. Examples of "
                         "skipped codes (one filename per code):"
                     )
                     top = sorted(img_stats["skip_samples"].items())[:25]
@@ -687,3 +745,4 @@ if _running_under_streamlit():
 # ============================================================================
 elif __name__ == "__main__":
     _run_cli()
+

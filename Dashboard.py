@@ -317,7 +317,7 @@ def smiling_rocks_converter() -> None:
     st.markdown("---")
     st.subheader("Results")
 
-    unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]$", "", regex=True).nunique() if "Stock Number" in df else 0
+    unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]+$", "", regex=True).nunique() if "Stock Number" in df else 0
     rows_with_img = (df["Image Url 1"] != "").sum() if "Image Url 1" in df else 0
 
     c1, c2, c3, c4 = st.columns(4)
@@ -479,3 +479,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

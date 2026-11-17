@@ -236,8 +236,8 @@ def _metal_color(value):
 
 
 def _metal_name(purity, color):
-    names = '/'.join(COLOR_NAME[c] for c in color)
-    return f"{purity} {names} Gold" + (' Two Tone' if len(color) == 2 else ' Three Tone' if len(color) == 3 else '')
+    names = ' '.join(COLOR_NAME[c] for c in color)
+    return f"{purity} {names} Gold"
 
 
 def _item_colors(item):

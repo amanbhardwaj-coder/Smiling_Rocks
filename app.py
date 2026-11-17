@@ -62,6 +62,13 @@ SHAPE_MAP = {
     'PER':'Pear','PEAR':'Pear','CUS':'Cushion','CUSHION':'Cushion','PRN':'Princess','PRINCESS':'Princess',
     'RAD':'Radiant','RADIANT':'Radiant','MAR':'Marquise','MQS':'Marquise','MARQUISE':'Marquise',
     'TRI':'Triangle','ASR':'Asscher','TAP':'Taper','HMN':'Half Moon','HRT':'Heart','HEART':'Heart',
+    'KTE':'Kite','KT':'Kite','KITE':'Kite',
+    'OCT':'Octagonal','OCTAGON':'Octagonal','OCTAGONAL':'Octagonal',
+    'ROU':'Round','OV':'Oval','EM':'Emerald','EME':'Emerald','EC':'Emerald',
+    'CU':'Cushion','CUSH':'Cushion','PRS':'Princess','PRIN':'Princess','PC':'Princess',
+    'MQ':'Marquise','MARQ':'Marquise','HT':'Heart','ASS':'Asscher','ASC':'Asscher',
+    'TRIL':'Trilliant','TRL':'Trilliant','TRILLIANT':'Trilliant',
+    'BQ':'Baguette','BAGT':'Baguette','TB':'Tapered Baguette','TAPB':'Tapered Baguette',
 }
 COLOR_MAP = {
     'WHSR':'White','WHT':'White','WHITE':'White',

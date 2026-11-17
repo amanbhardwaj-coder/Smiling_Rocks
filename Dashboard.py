@@ -236,23 +236,20 @@ def smiling_rocks_converter() -> None:
     with st.sidebar:
         st.subheader("Converter settings")
         collection = st.text_input(
-            "Collection / Config Field 13",
+            "Main collection / specific collection",
             value=getattr(core, "DEFAULT_COLLECTION", "Essential"),
-            help="Example: Essential, Smiling Brides, Fashion.",
+            help="Auto, Essentials, Bridals, Haute Couture, Fashion Collections, Men's, or a specific collection.",
         ).strip() or getattr(core, "DEFAULT_COLLECTION", "Essential")
 
         st.markdown("---")
-        remark_map = getattr(core, "REMARK_MAP", {})
-        st.caption(f"Mapped remarks: {len(remark_map)}")
-        with st.expander("View remark map"):
-            if remark_map:
-                rm_df = pd.DataFrame(
-                    [(k, v[0], v[1], v[2]) for k, v in remark_map.items()],
-                    columns=["MFG Remark", "Sub-Cat rule", "Config Field 14", "Jewelry Style"],
-                ).sort_values("MFG Remark").reset_index(drop=True)
-                st.dataframe(rm_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No remark map found.")
+        st.caption(f"Collections: {len(core.COLLECTION_GROUPS)}")
+        with st.expander("Collection and style mappings"):
+            rm_df = pd.DataFrame(
+                [(core.COLLECTION_GROUPS[c], c, style, cf14)
+                 for c, style, cf14 in core.CLASSIFICATIONS],
+                columns=["Main collection", "Config Field 13", "Jewelry Style", "Config Field 14"],
+            )
+            st.dataframe(rm_df, use_container_width=True, hide_index=True)
 
     col_l, col_r = st.columns(2)
     with col_l:
@@ -337,10 +334,9 @@ def smiling_rocks_converter() -> None:
     )
 
     if unknown:
-        with st.expander(f"⚠️ {len(unknown)} unmapped MFG remark(s)", expanded=True):
+        with st.expander(f"⚠️ {len(unknown)} collection/style mapping(s) need review", expanded=True):
             st.write(
-                "These remarks were defaulted in Config Field 14 / Jewelry Style. "
-                "Add them to REMARK_MAP in app.py when you want fixed mapping."
+                "These collection/style mappings need review. Unresolved fields are left blank."
             )
             st.code("\n".join(unknown))
 

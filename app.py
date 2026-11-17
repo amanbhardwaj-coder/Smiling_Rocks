@@ -21,6 +21,8 @@ import re
 import sys
 from decimal import Decimal, ROUND_HALF_UP
 
+from collection_mappings import COLLECTION_GROUPS, CLASSIFICATIONS, BASE_CLASSIFICATIONS
+
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -28,7 +30,7 @@ from openpyxl import load_workbook
 # ============================================================================
 # CONFIG
 # ============================================================================
-DEFAULT_COLLECTION = "Essential"             # → Config Field 13 when not overridden
+DEFAULT_COLLECTION = "Auto"                  # Resolve collection/style from source and reference
 IMG_BASE     = "https://d2dtfeai6qg5ne.cloudfront.net/Smiling_Rocks/"
 MAX_IMAGES   = 8                              # Image Url 1..8
 SIDE_COLOR, SIDE_CLARITY = "E-F", "SI1"       # 29-May convention
@@ -133,6 +135,104 @@ def _fmt2_fixed(v):
     return f"{v:.2f}"
 
 
+MAIN_COLLECTIONS = ('Essentials', 'Bridals', 'Haute Couture', 'Fashion Collections', "Men's")
+
+
+def _category_key(value):
+    key = re.sub(r'[^a-z0-9]+', '', _txt(value).lower())
+    return {'essentials': 'essential', 'fashionbridal': 'fashionbridals',
+            'mens': 'men', 'men': 'men', 'stairynight': 'thestarrynight'}.get(key, key)
+
+
+def _classification_tags(group, collection, style, cf14):
+    if group == 'Essentials':
+        values = ['Essential', cf14 if cf14 != 'Fashion' else '']
+    elif group == 'Bridals':
+        values = ['Bridal', collection, cf14]
+    elif group == 'Fashion Collections':
+        values = ['Fashion', collection if collection != 'Fashion' else style]
+    elif group == "Men's":
+        values = [collection, 'Men']
+    else:
+        values = [collection, style]
+    return ','.join(dict.fromkeys(v for v in values if v))
+
+
+def resolve_classification(item, selection=DEFAULT_COLLECTION):
+    """Resolve reference tuples without flattening collection/style/filter fields.
+
+    Explicit collection/style context disambiguates existing SKU mappings.
+    New items use the same collection rules. Conflicts return a review message
+    rather than choosing the most frequent historical mapping.
+    """
+    selected = _category_key(selection)
+    main_aliases = {'essential': 'Essentials', 'bridal': 'Bridals', 'bridals': 'Bridals',
+                    'hautecouture': 'Haute Couture', 'fashioncollections': 'Fashion Collections',
+                    'men': "Men's"}
+    main = main_aliases.get(selected)
+    names = {_category_key(c): c for c in COLLECTION_GROUPS}
+    explicit_collection = names.get(selected) if not main else None
+    source_collection = names.get(_category_key(item.get('source_collection', '')))
+    remark = _txt(item.get('remark', ''))
+    remark_key = _category_key(remark)
+    explicit_style = _txt(item.get('source_style', ''))
+    style_key = _category_key(explicit_style or remark)
+    # Preserve established legacy remark aliases such as SOLITAIRE STUDS.
+    legacy = REMARK_MAP.get(re.sub(r'\s+', ' ', remark.upper()).strip())
+    if legacy and not explicit_style:
+        style_key = _category_key(legacy[2])
+    if not main and selected in ('auto', ''):
+        main = main_aliases.get(_category_key(item.get('source_collection', '')))
+    remark_collection = names.get(remark_key)
+    if remark_collection and main and COLLECTION_GROUPS[remark_collection] != main:
+        remark_collection = None
+    target = explicit_collection or source_collection or remark_collection
+
+    def matches(row):
+        c, st, cf = row
+        return (not main or COLLECTION_GROUPS[c] == main) and (not target or c == target)
+
+    candidates = [CLASSIFICATIONS[i] for i in BASE_CLASSIFICATIONS.get(item.get('base', ''), [])]
+    candidates = [r for r in candidates if matches(r)]
+    if not candidates:
+        candidates = [r for r in CLASSIFICATIONS if matches(r)]
+    specific = [r for r in candidates if _category_key(r[1]) == style_key]
+    if not specific:
+        specific = [r for r in candidates if _category_key(r[2]) == style_key]
+    if specific:
+        candidates = specific
+    elif explicit_style or (remark and remark_key not in names and not main_aliases.get(remark_key)):
+        candidates = []
+    candidates = sorted(set(candidates))
+    if len(candidates) == 1:
+        c, style, cf14 = candidates[0]
+        group = COLLECTION_GROUPS[c]
+        return c, style, cf14, _classification_tags(group, c, style, cf14), ''
+
+    # New fashion collections follow the named collection / Fashion pattern
+    # only when the user explicitly selected that main group.
+    if not candidates and main == 'Fashion Collections' and remark and not target:
+        c = _txt(item.get('source_collection', '')) or remark
+        style = explicit_style or remark
+        return c, style, 'Fashion', _classification_tags(main, c, style, 'Fashion'), ''
+    if legacy and (not main or main == 'Essentials') and (not target or target == 'Essential'):
+        _, cf14, style = legacy
+        return 'Essential', style, cf14, _classification_tags('Essentials', 'Essential', style, cf14), ''
+
+    c = target or (selection if selected not in ('auto', '') and not main else '')
+    style = explicit_style or remark
+    # Preserve shared fields of a conflicting reference set, leaving only
+    # the unresolved classification blank for review.
+    if candidates:
+        fields = [set(r[i] for r in candidates) for i in range(3)]
+        c, style, cf14 = [next(iter(v)) if len(v) == 1 else '' for v in fields]
+        issue = f"Ambiguous mapping: {item.get('base', '')} / {remark or selection}"
+    else:
+        cf14 = ''
+        issue = f"Unmapped collection/style: {item.get('base', '')} / {remark or selection}"
+    return c, style, cf14, '', issue
+
+
 # ============================================================================
 # IMAGE-LIST LOADER
 # ============================================================================
@@ -203,6 +303,7 @@ _HEADER_ALIASES = {
     'variation':  ('variation', 'variations'),
     'remark':     ('remark',),
     'collection': ('collection',),
+    'source_style': ('jewelrystyle', 'jewelrystyles',),
 }
 
 def _find_header(rows, max_scan=80):
@@ -331,6 +432,8 @@ def extract(path_or_file):
                     'base': (m.group(0) if m else ''),
                     'jtype': '',
                     'remark': remark_val or collection_val,
+                    'source_collection': collection_val,
+                    'source_style': _txt(cell(row, 'source_style')),
                     'dc':  _num(cell(row, 'dc')),
                     'srp': _num(cell(row, 'srp')),
                     'total_dia': 0.0,
@@ -418,12 +521,12 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
     Args:
         inputs:     list of MFG .xlsx file paths OR file-like objects.
         image_map:  dict from load_image_map(), or None to skip image URLs.
-        collection: Config Field 13 / collection name (e.g. 'Essential').
+        collection: 'Auto', a main collection group, or a specific Config Field 13 collection.
 
     Returns:
         (df, unknown_remarks) where df has the 41 VDB columns and
-        unknown_remarks is the set of MFG remarks not in REMARK_MAP
-        (those are defaulted in the output; caller may surface them).
+        unknown_remarks contains unresolved/ambiguous classification messages.
+        Unresolved fields are left blank for review.
     """
     image_map = image_map or {}
     items = []
@@ -452,17 +555,13 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
         )
 
         for purity, it in sorted(purs.items()):
-            # Category mapping from MFG remark
-            rk = re.sub(r'\s+', ' ', it['remark'].upper()).strip()
-            if rk in REMARK_MAP:
-                rule, cf14, style = REMARK_MAP[rk]
-                subcat = it['jtype'] if rule == 'jtype' else rule
-            else:
-                if rk:
-                    unknown.add(it['remark'])
-                subcat = it['jtype'] or 'Jewelry'
-                cf14 = style = it['remark'].title()
-            subcat = subcat or 'Jewelry'
+            item_collection, style, cf14, tags, issue = resolve_classification(it, collection)
+            if issue:
+                unknown.add(issue)
+            legacy = REMARK_MAP.get(re.sub(r'\s+', ' ', it['remark'].upper()).strip())
+            subcat = it['jtype'] or 'Jewelry'
+            if legacy and legacy[0] != 'jtype':
+                subcat = legacy[0]
 
             # Stone aggregates
             cen_ct   = sum(c['carat'] for c in it['centers'])
@@ -473,12 +572,11 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
                      else (it['sides'][0]['shape'] if it['sides'] else 'Round')) or 'Round'
             side_shape = (it['sides'][0]['shape'] if it['sides'] else 'Round') or 'Round'
             comment = _build_comment(it['centers'], it['sides'])
-            tags = collection if (cf14 == 'Fashion' or not cf14) else f"{collection},{cf14}"
 
             for C in _item_colors(it):
                 metal = _metal_name(purity, C)
                 wt = _fmt2_fixed(weight)                # 2dp Weight w/ trailing zero
-                title = re.sub(r'\s+', ' ', f"{collection} {style} {wt}CT {metal} {subcat}").strip()
+                title = re.sub(r'\s+', ' ', f"{item_collection} {style} {wt}CT {metal} {subcat}").strip()
                 urls = image_map.get((base.upper(), C), [])[:MAX_IMAGES]
                 imgcols = {f'Image Url {i}': (urls[i-1] if i <= len(urls) else '')
                            for i in range(1, MAX_IMAGES + 1)}
@@ -488,7 +586,7 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
                     'Stock Number':            f"{base}-{purity}{C}",
                     'Jewelry Sub-Category':    subcat,
                     'Jewelry Style':           style,
-                    'Config Field 13':         collection,
+                    'Config Field 13':         item_collection,
                     'Config Field 14':         cf14,
                     'Tags':                    tags,
                     'Short Title':             title,
@@ -552,7 +650,7 @@ def _run_cli(argv=None):
     print(f"Unique styles: {n_styles}")
     print(f"Rows with at least one image: {(df['Image Url 1'] != '').sum()}/{len(df)}")
     if unknown:
-        print("\n[!] Unmapped remarks (defaulted, please add to REMARK_MAP):")
+        print("\n[!] Collection/style mappings requiring review (unresolved fields are blank):")
         for u in sorted(unknown):
             print("   ", u)
 
@@ -600,19 +698,19 @@ if _running_under_streamlit():
     with st.sidebar:
         st.header("Settings")
         collection = st.text_input(
-            "Collection (Config Field 13)",
+            "Main collection / specific collection",
             value=DEFAULT_COLLECTION,
-            help="Shown as Config Field 13 in the output. Change it per MFG file "
-                 "(e.g. Essential, Smiling Brides, Fashion).",
+            help="Auto uses the reference mappings. Or enter Essentials, Bridals, Haute Couture, "
+                 "Fashion Collections, Men's, or a specific collection such as Flora.",
         ).strip() or DEFAULT_COLLECTION
 
         st.markdown("---")
-        st.caption(f"**Mapped remarks:** {len(REMARK_MAP)}")
-        with st.expander("Show remark → category map"):
+        st.caption(f"**Collections:** {len(COLLECTION_GROUPS)}")
+        with st.expander("Collection and style mappings"):
             rm_df = pd.DataFrame(
-                [(k, v[0], v[1], v[2]) for k, v in REMARK_MAP.items()],
-                columns=["MFG Remark", "Sub-Cat rule", "Config Field 14", "Jewelry Style"],
-            ).sort_values("MFG Remark").reset_index(drop=True)
+                [(COLLECTION_GROUPS[c], c, style, cf14) for c, style, cf14 in CLASSIFICATIONS],
+                columns=["Main collection", "Config Field 13", "Jewelry Style", "Config Field 14"],
+            )
             st.dataframe(rm_df, use_container_width=True, hide_index=True)
 
     # ---- uploads ----
@@ -700,13 +798,11 @@ if _running_under_streamlit():
         # warnings
         if unknown:
             with st.expander(
-                f"⚠️ {len(unknown)} MFG remark(s) not in REMARK_MAP — defaulted in output",
+                f"⚠️ {len(unknown)} collection/style mapping(s) need review",
                 expanded=True,
             ):
                 st.write(
-                    "These remarks were defaulted (Config Field 14 / Jewelry Style "
-                    "set to a title-case copy of the remark). To map them properly, "
-                    "edit `REMARK_MAP` near the top of `app.py`."
+                    "These collection/style mappings need review. Unresolved fields are left blank."
                 )
                 st.code("\n".join(unknown))
 

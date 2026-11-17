@@ -65,6 +65,7 @@ SHAPE_MAP = {
 }
 COLOR_MAP = {
     'WHSR':'White','WHT':'White','WHITE':'White',
+    'BRSR':'Brown',
     'BLSR':'Blue','BSSR':'Blue','BLU':'Blue','BLUE':'Blue',
     'PKSR':'Pink','PNK':'Pink','PINK':'Pink',
     'GNSR':'Green','GRSR':'Green','GSR':'Green','TSSR':'Green','GRN':'Green','GREEN':'Green',

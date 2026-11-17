@@ -49,7 +49,7 @@ class ConverterTests(unittest.TestCase):
         df, _ = app.convert([self.combined(default='WY', variation='NO')])
         self.assertEqual(list(df['Stock Number']), ['SRR-00001BRN-14KWY', 'SRR-00001BRN-18KWY'])
         self.assertEqual(set(df['Master Stock']), {'SRR-00001BRN-14KWY'})
-        self.assertTrue(df['Metal'].str.contains('White/Yellow Gold Two Tone').all())
+        self.assertTrue(df['Metal'].str.contains('White Yellow Gold').all())
         self.assertEqual(df.iloc[0]['Available Metals'], '#'.join(df['Metal']))
         df, _ = app.convert([self.combined(default='RG', variation='NO')])
         self.assertEqual(len(df), 2)

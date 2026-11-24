@@ -239,18 +239,20 @@ def resolve_classification(item, selection=DEFAULT_COLLECTION):
 # Accept color + index codes, including explicit combinations such as WY1.
 # Anything else (WG/YG/RG metal codes, LS/LF loose-stone, digits-only,
 # "W1 (1)") is skipped on purpose.
-_IMG_CODE_RE = re.compile(r'^([WYR]{1,3})(\d+)$', re.I)
+_IMG_CODE_RE = re.compile(r'^([WYR]{1,3})(\d*)$', re.I)
 
 def load_image_map(path_or_file):
     """Read a one-column image-filename list and build {(base, colorLetter): [urls by index]}.
 
     Filenames look like `SRBA-02008WHT_W2.jpg` or `SR-E04139WHT_Y1.jpg`
+    or unnumbered two tone files such as `SRNL-09626BRN_WY.jpg`.
+    The CSV may have a header or start directly with a filename.
     (split on the LAST '_'). Returns (image_map, stats) where stats includes
     accepted/skipped counts and a sample of skipped codes for diagnostics.
     """
     if not path_or_file:
         return {}, {'accepted': 0, 'skipped': 0, 'skip_samples': {}}
-    df = pd.read_csv(path_or_file, dtype=str).fillna('')
+    df = pd.read_csv(path_or_file, dtype=str, header=None).fillna('')
     col = df.columns[0]
     tmp = {}
     accepted = 0
@@ -269,7 +271,7 @@ def load_image_map(path_or_file):
             skip_samples.setdefault(code, fn)
             continue
         C = m.group(1).upper()
-        idx = int(m.group(2))
+        idx = int(m.group(2) or 0)
         tmp.setdefault((base.upper(), C), []).append((idx, fn))
         accepted += 1
     out = {k: [IMG_BASE + fn for _, fn in sorted(v)] for k, v in tmp.items()}
@@ -821,7 +823,7 @@ if _running_under_streamlit():
                     "(WG/YG/RG, LS, LF, digits-only, malformed)"
                 ):
                     st.caption(
-                        "W1/Y1/R1 and two tone codes such as WY1 are accepted. Examples of "
+                        "W1/Y1/R1 and two tone codes such as WY or WY1 are accepted. Examples of "
                         "skipped codes (one filename per code):"
                     )
                     top = sorted(img_stats["skip_samples"].items())[:25]

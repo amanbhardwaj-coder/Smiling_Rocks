@@ -14,7 +14,7 @@ class CollectionMappingTests(unittest.TestCase):
         pairs = defaultdict(set)
         for collection, style, cf14 in CLASSIFICATIONS:
             pairs[collection, style].add(cf14)
-        self.assertEqual(len(COLLECTION_GROUPS), 60)  # 61 source names, one singular/plural alias
+        self.assertEqual(len(COLLECTION_GROUPS), 61)  # 60 canonical reference collections plus Brown
         for (collection, style), options in pairs.items():
             with self.subTest(collection=collection, style=style):
                 c, s, cf14, tags, issue = self.resolve(collection, style)
@@ -43,11 +43,11 @@ class CollectionMappingTests(unittest.TestCase):
         self.assertEqual(result[:3], ('Zulu', 'Zulu', 'Men'))
 
     def test_unknown_requires_review_without_assigned_group(self):
-        result = app.resolve_classification({'remark': 'BROWN'})
+        result = app.resolve_classification({'remark': 'NEW COLLECTION'})
         self.assertEqual(result[2], '')
         self.assertIn('Unmapped', result[-1])
-        result = app.resolve_classification({'remark': 'BROWN'}, 'Fashion Collections')
-        self.assertEqual(result[:3], ('BROWN', 'BROWN', 'Fashion'))
+        result = app.resolve_classification({'remark': 'NEW COLLECTION'}, 'Fashion Collections')
+        self.assertEqual(result[:3], ('NEW COLLECTION', 'NEW COLLECTION', 'Fashion'))
 
     def test_legacy_essential_alias_and_singular_bridal(self):
         result = app.resolve_classification({'remark': 'SOLITAIRE STUDS'}, 'Essentials')

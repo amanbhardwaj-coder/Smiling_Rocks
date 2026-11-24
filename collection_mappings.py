@@ -3557,3 +3557,7 @@ BASE_CLASSIFICATIONS = {'SRBA-00253WHT': [41],
  'SRR-09262WHT': [39],
  'SRR-09263WHT': [39],
  'SRR-09264WHT': [122]}
+
+# Brown collection approved after the 6 Nov reference inventory.
+COLLECTION_GROUPS["Brown"] = "Fashion Collections"
+CLASSIFICATIONS.append(("Brown", "Brown", "Fashion"))

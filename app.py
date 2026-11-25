@@ -311,6 +311,10 @@ _HEADER_ALIASES = {
     'remark':     ('remark',),
     'collection': ('collection', 'collectionname'),
     'source_style': ('jewelrystyle', 'jewelrystyles',),
+    'declared_style': ('stylename',),
+    'declared_variation': ('variationsyesno',),
+    'group_styles': ('variationstyles',),
+    'variation_columns': ('variationcolumns',),
 }
 
 def _find_header(rows, max_scan=80):
@@ -331,6 +335,9 @@ def _find_header(rows, max_scan=80):
                 if a in normalized:
                     idx[field] = normalized.index(a)
                     break
+        if all(f in idx for f in ('declared_style','declared_variation','group_styles','variation_columns')):
+            columns=[j for j,n in enumerate(normalized) if n in ('collectionname','maincollection','maincollectionname')]
+            if columns:idx['declared_collection']=columns[-1]
         return r, idx
     return None, None
 
@@ -452,6 +459,12 @@ def extract(path_or_file, diagnostics=None):
                 collection_val = _txt(cell(row, 'collection'))
                 cur = {
                     'sheet': sheet_name, 'source_row': r + 1, 'purity': purity, 'combined': combined,
+                    'instructions_present': 'declared_collection' in idx,
+                    'instructions': {'collection': _txt(cell(row,'declared_collection')),
+                                     'style': _txt(cell(row,'declared_style')),
+                                     'variation': _txt(cell(row,'declared_variation')),
+                                     'styles': _txt(cell(row,'group_styles')),
+                                     'columns': _txt(cell(row,'variation_columns'))},
                     'default_color_raw': _txt(cell(row, 'default_color')),
                     'source_errors': [f'{f}: {_txt(cell(row, f))}' for f in
                                       ('collection', 'dc', 'srp', '14kdc', '18kdc', '14ksrp', '18ksrp')
@@ -575,7 +588,24 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
     for p in inputs:
         items.extend(extract(p))
 
+    if any(i.get('instructions_present') for i in items):
+        from workbook_inventory import build_from_items
+        from saved_inventory_rules import load_rules
+        df,reports=build_from_items(items,image_map,rules=load_rules(inputs))
+        return df,set(reports['issues'].loc[reports['issues']['severity']=='error','details'])
     return convert_items(items, image_map, collection)
+
+
+def convert_with_reports(inputs, image_map=None, collection=DEFAULT_COLLECTION):
+    items=[]; diagnostics=[]
+    for source in inputs:items.extend(extract(source,diagnostics))
+    if any(i.get('instructions_present') for i in items):
+        from workbook_inventory import build_from_items
+        from saved_inventory_rules import load_rules
+        df,reports=build_from_items(items,image_map,diagnostics,rules=load_rules(inputs))
+        return df,reports,set()
+    df,unknown=convert_items(items,image_map,collection)
+    return df,None,unknown
 
 
 def convert_items(items, image_map=None, collection=DEFAULT_COLLECTION):
@@ -704,8 +734,14 @@ def _run_cli(argv=None):
         if reports['summary']['blocking_issues']:
             raise SystemExit(2)
         return
-    df, unknown = convert(a.inputs, imap, collection=a.collection)
+    df,reports,unknown=convert_with_reports(a.inputs, imap, collection=a.collection)
     df.to_csv(a.output, index=False)
+    if reports is not None:
+        from pathlib import Path
+        from inventory_reconcile import audit_zip
+        Path(a.output).with_suffix('.audit.zip').write_bytes(audit_zip(df,reports))
+        print(reports['summary'])
+        if reports['summary']['blocking_issues']:raise SystemExit(2)
     print(f"Wrote {len(df)} rows -> {a.output}")
     n_styles = df['Stock Number'].str.replace(r'-..K[WYR]+$', '', regex=True).nunique()
     print(f"Unique styles: {n_styles}")
@@ -793,11 +829,13 @@ if _running_under_streamlit():
             key="images",
         )
 
-    reference_file = st.file_uploader(
-        "3. Approved VDB inventory CSV (recommended for full inventory updates)", type=["csv"],
-        key="reference_inventory", help="Preserves existing master groups, variations, collection/style mappings, "
-        "center/side details and images. Client prices and default masters are reconciled with audit reports.",
-    )
+    st.caption("Confirmation workbook + image CSV: no reference inventory upload is required.")
+    with st.expander("Legacy reference comparison (optional)"):
+        reference_file = st.file_uploader(
+            "Optional legacy reference CSV — not needed for the confirmation workbook", type=["csv"],
+            key="reference_inventory", help="Preserves existing master groups, variations, collection/style mappings, "
+            "center/side details and images. Client prices and default masters are reconciled with audit reports.",
+        )
 
     # ---- convert ----
     disabled = not mfg_files
@@ -826,7 +864,7 @@ if _running_under_streamlit():
                     df, reports = build_inventory(inputs, io.BytesIO(reference_file.getvalue()), image_map)
                     unknown = set()
                 else:
-                    df, unknown = convert(inputs, image_map, collection=collection)
+                    df, reports, unknown = convert_with_reports(inputs, image_map, collection=collection)
         except Exception as e:
             st.error(f"Conversion failed: {e}")
             st.stop()

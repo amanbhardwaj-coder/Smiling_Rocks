@@ -269,11 +269,13 @@ def smiling_rocks_converter() -> None:
             key="dashboard_img_file",
         )
 
-    reference_file = st.file_uploader(
-        "3. Approved VDB inventory CSV (recommended for full inventory updates)",
-        type=["csv"], key="dashboard_reference_inventory",
-        help="Preserves curated groups, variations, styles and stone details; audits source changes.",
-    )
+    st.caption("Confirmation workbook + image CSV: no reference inventory upload is required.")
+    with st.expander("Legacy reference comparison (optional)"):
+        reference_file = st.file_uploader(
+            "Optional legacy reference CSV — not needed for the confirmation workbook",
+            type=["csv"], key="dashboard_reference_inventory",
+            help="Preserves curated groups, variations, styles and stone details; audits source changes.",
+        )
 
     run = st.button(
         "Convert to VDB CSV",
@@ -303,7 +305,7 @@ def smiling_rocks_converter() -> None:
                     df, reports = build_inventory(inputs, io.BytesIO(reference_file.getvalue()), image_map)
                     unknown = set()
                 else:
-                    df, unknown = core.convert(inputs, image_map, collection=collection)
+                    df, reports, unknown = core.convert_with_reports(inputs, image_map, collection=collection)
         except Exception as exc:
             st.error(f"Conversion failed: {exc}")
             st.stop()

@@ -307,9 +307,27 @@ def reconcile(items, reference, image_map=None, diagnostics=None):
                 crosswalk.append((label, *classification, base, purity))
     crosswalk = pd.DataFrame(crosswalk, columns=['Client collection label', 'Config Field 13',
         'Jewelry Style', 'Config Field 14', 'Base Stock', 'Purity']).drop_duplicates()
-    return result, dict(issues=issues, client_actions=action_summary, differences=diffs, collection_crosswalk=crosswalk,
-                       source_items=pd.DataFrame(source_rows), new_items=drafts,
-                       conflicting_reference_rows=conflict_rows, summary=summary)
+    reports = dict(issues=issues, client_actions=action_summary, differences=diffs, collection_crosswalk=crosswalk,
+                   source_items=pd.DataFrame(source_rows), new_items=drafts,
+                   conflicting_reference_rows=conflict_rows, summary=summary)
+    from master_validation import validate_masters
+    result, master_reports = validate_masters(ref, result, items)
+    reports.update(master_reports)
+    master_issues = master_reports['master_validation_issues'].copy()
+    if not master_issues.empty:
+        master_issues['action'] = 'Review the per-master column/availability trace; supply or confirm the missing dependency or policy.'
+        reports['issues'] = pd.concat([issues, master_issues], ignore_index=True).fillna('')
+        reports['client_actions'] = reports['issues'].groupby(['severity', 'issue', 'action'], sort=False).size().reset_index(name='occurrences')
+    summary['blocking_issues'] += master_reports['master_validation_summary']['blocking_master_validation_issues']
+    summary['warnings'] += master_reports['master_validation_summary']['warning_master_validation_issues']
+    summary.update(master_reports['master_validation_summary'])
+    summary['publish_ready'] = summary['blocking_issues'] == 0
+    repaired = master_reports['availability_repairs']
+    if not repaired.empty:
+        changes = repaired.rename(columns={'previous':'reference','updated':'client'})[['stock_number','field','reference','client']].copy()
+        changes['action'] = 'rebuilt_from_master_variants'
+        reports['differences'] = pd.concat([diffs, changes], ignore_index=True)
+    return result, reports
 
 
 def build_inventory(inputs, reference, image_map=None):
@@ -335,6 +353,10 @@ def audit_zip(inventory, reports):
             'Conflicting reference SKUs are excluded. Missing source items and ambiguous source prices retain reference values for review.\n'
             'new_items.csv contains unapproved default-color drafts, not live inventory additions.\n'
             'collection_crosswalk.csv traces client labels to the existing collection/style/filter values.\n'
+            'master_trace.csv explains each shared master decision and its client evidence.\n'
+            'master_column_audit.csv covers every named column for every reference master.\n'
+            'availability_audit.csv and availability_repairs.csv show inferred dependencies and supported option repairs.\n'
+            'master_validation_issues.csv reports unresolved rules, title/stone/image/size problems.\n'
             'Image checks cover filename/color matching only; remote URLs have not been fetched.\n')
     return buffer.getvalue()
 
@@ -353,6 +375,9 @@ def render_audit(st, inventory, reports, key='reconciliation'):
         st.success('Reconciliation passed without blocking issues. Review any warnings and new-item drafts.')
     with st.expander('Issues and client actions', expanded=bool(summary['blocking_issues'])):
         st.dataframe(reports['issues'], use_container_width=True, hide_index=True)
+    with st.expander('Master creation and available-option rules'):
+        st.dataframe(reports['master_trace'], use_container_width=True, hide_index=True)
+        st.dataframe(reports['availability_audit'], use_container_width=True, hide_index=True)
     with st.expander('Price changes, master changes and source differences'):
         st.dataframe(reports['differences'], use_container_width=True, hide_index=True)
     st.download_button('Download inventory and audit reports', data=audit_zip(inventory, reports),

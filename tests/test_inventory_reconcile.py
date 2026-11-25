@@ -28,7 +28,7 @@ def row(base='SRR-90001WHT', purity='14K', color='W', master=None):
                   'Tags': 'Fashion,Flora', 'Total Price': '100.00', 'Config Field 17': '250.00',
                   'Weight': '0.50', 'Image Url 1': 'https://example.com/curated.jpg',
                   'Short Title': 'Approved title', 'Description': 'Approved description',
-                  'Available Metals': '14K White Gold#14K Yellow Gold',
+                  'Available Metals': app._metal_name(purity, color),
                   'Center Carat Weight': '0.30', 'Side Carat Weight': '0.20'})
     return value
 

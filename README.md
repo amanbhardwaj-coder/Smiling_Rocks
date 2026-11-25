@@ -30,3 +30,18 @@ python -m unittest discover -s tests
 ```
 
 Regression coverage includes header aliases, nested XLSX ZIPs, reference field preservation, combined-sheet priority, conflicting prices/SKUs, shared masters, missing source items, invalid prices, new-style isolation and exact-color image matching.
+
+## Every-master, every-column validation
+
+Full-inventory mode audits every named reference column for every master group. Reports include:
+
+- `master_trace.csv`: original/generated/expected master, linked styles, source rows/default colors, eligible 14K variants, missing members, and exact selection rule (same base first; then an existing group member; otherwise retain the original).
+- `master_column_audit.csv`: every column for every master, with lineage, populated counts and complete distinct reference/generated values.
+- `availability_audit.csv`: observed options, expected options, supported dependency columns, and unresolved rules.
+- `availability_repairs.csv`: supported option-list corrections, SKU by SKU.
+- `master_validation_issues.csv`: structural, numeric, image, title/carat, stone, barcode and option-policy checks.
+- `column_rules.csv`: source/generation rules for every business column.
+
+Available Metals, Config field 11, Center Carat Weight, Shape and Config Field 6 are derived from actual master members. If the reference proves that a list depends on another selected field, that dependency is used. An unexplained or ambiguous rule blocks readiness instead of being replaced by a guessed global list. Numeric lists are deduplicated and sorted in ascending order when repaired; equivalent formats such as `1.0`/`1.00` compare numerically.
+
+Available Ring Size and Available Config Field 7 are validated as explicit policies because the file contains no corresponding scalar size/length variation columns. Their full ranges cannot be inferred from one quoted sample size. The tool preserves these lists, reports invalid increments/order, and requests an approved policy rather than inventing sizes or lengths.

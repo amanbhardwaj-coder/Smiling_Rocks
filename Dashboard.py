@@ -237,6 +237,7 @@ def smiling_rocks_converter() -> None:
         st.subheader("Converter settings")
         collection = st.text_input(
             "Main collection / specific collection",
+            key="dashboard_collection_input",
             value=getattr(core, "DEFAULT_COLLECTION", "Essential"),
             help="Auto, Essentials, Bridals, Haute Couture, Fashion Collections, Men's, or a specific collection.",
         ).strip() or getattr(core, "DEFAULT_COLLECTION", "Essential")

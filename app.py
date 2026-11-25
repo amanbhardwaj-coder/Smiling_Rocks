@@ -776,7 +776,7 @@ def _running_under_streamlit():
 # ============================================================================
 # STREAMLIT UI — only executes when launched via `streamlit run app.py`
 # ============================================================================
-if _running_under_streamlit():
+if __name__ == "__main__" and _running_under_streamlit():
     import streamlit as st
 
     st.set_page_config(
@@ -796,6 +796,7 @@ if _running_under_streamlit():
         st.header("Settings")
         collection = st.text_input(
             "Main collection / specific collection",
+            key="standalone_collection_input",
             value=DEFAULT_COLLECTION,
             help="Auto uses the reference mappings. Or enter Essentials, Bridals, Haute Couture, "
                  "Fashion Collections, Men's, or a specific collection such as Flora.",

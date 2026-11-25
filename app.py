@@ -19,6 +19,9 @@ import argparse
 import io
 import re
 import sys
+import zipfile
+import shutil
+import tempfile
 from decimal import Decimal, ROUND_HALF_UP
 
 from collection_mappings import COLLECTION_GROUPS, CLASSIFICATIONS, BASE_CLASSIFICATIONS
@@ -64,6 +67,7 @@ SHAPE_MAP = {
     'PER':'Pear','PEAR':'Pear','CUS':'Cushion','CUSHION':'Cushion','PRN':'Princess','PRINCESS':'Princess',
     'RAD':'Radiant','RADIANT':'Radiant','MAR':'Marquise','MQS':'Marquise','MARQUISE':'Marquise',
     'TRI':'Triangle','ASR':'Asscher','TAP':'Taper','HMN':'Half Moon','HRT':'Heart','HEART':'Heart',
+    'MRQ':'Marquise','ELCUS':'Cushion Long','TRZ':'Trapezoid','MIX':'Mixed',
     'KTE':'Kite','KT':'Kite','KITE':'Kite',
     'OCT':'Octagonal','OCTAGON':'Octagonal','OCTAGONAL':'Octagonal',
     'ROU':'Round','OV':'Oval','EM':'Emerald','EME':'Emerald','EC':'Emerald',
@@ -194,6 +198,7 @@ def resolve_classification(item, selection=DEFAULT_COLLECTION):
 
     candidates = [CLASSIFICATIONS[i] for i in BASE_CLASSIFICATIONS.get(item.get('base', ''), [])]
     candidates = [r for r in candidates if matches(r)]
+    has_base_mapping = bool(candidates)
     if not candidates:
         candidates = [r for r in CLASSIFICATIONS if matches(r)]
     specific = [r for r in candidates if _category_key(r[1]) == style_key]
@@ -201,7 +206,7 @@ def resolve_classification(item, selection=DEFAULT_COLLECTION):
         specific = [r for r in candidates if _category_key(r[2]) == style_key]
     if specific:
         candidates = specific
-    elif explicit_style or (remark and remark_key not in names and not main_aliases.get(remark_key)):
+    elif explicit_style or (not has_base_mapping and remark and remark_key not in names and not main_aliases.get(remark_key)):
         candidates = []
     candidates = sorted(set(candidates))
     if len(candidates) == 1:
@@ -274,7 +279,7 @@ def load_image_map(path_or_file):
         idx = int(m.group(2) or 0)
         tmp.setdefault((base.upper(), C), []).append((idx, fn))
         accepted += 1
-    out = {k: [IMG_BASE + fn for _, fn in sorted(v)] for k, v in tmp.items()}
+    out = {k: list(dict.fromkeys(IMG_BASE + fn for _, fn in sorted(v))) for k, v in tmp.items()}
     stats = {'accepted': accepted, 'skipped': skipped, 'skip_samples': skip_samples}
     return out, stats
 
@@ -301,10 +306,10 @@ _HEADER_ALIASES = {
     '18kdc':      ('18kdc',),
     '14ksrp':     ('14ksrp',),
     '18ksrp':     ('18ksrp',),
-    'default_color': ('defaultmetalcolor',),
+    'default_color': ('defaultmetalcolor', 'bydefaultmetalcolor', 'defaultmetal', 'defaultmetalmasterstock'),
     'variation':  ('variation', 'variations'),
     'remark':     ('remark',),
-    'collection': ('collection',),
+    'collection': ('collection', 'collectionname'),
     'source_style': ('jewelrystyle', 'jewelrystyles',),
 }
 
@@ -359,13 +364,29 @@ def _item_colors(item):
     return ('W', 'Y', 'R')
 
 
-def extract(path_or_file):
+def extract(path_or_file, diagnostics=None):
     """Parse one MFG .xlsx (path or file-like) into a list of item dicts.
 
     Auto-detects each sheet's header row and column positions so it works
     across MFG layout variants (extra leading column, renamed Remark vs
     collection column, etc.).
     """
+    diagnostics = diagnostics if diagnostics is not None else []
+    # Wrapped XLSX ZIPs can be large because of embedded photographs. Stream
+    # the nested workbook to disk rather than holding a second copy in memory.
+    with zipfile.ZipFile(path_or_file) as archive:
+        if 'xl/workbook.xml' not in archive.namelist():
+            names = [n for n in archive.namelist()
+                     if n.lower().endswith('.xlsx') and not n.startswith('__MACOSX/')]
+            if not names:
+                raise ValueError('ZIP contains no .xlsx workbook.')
+            nested_items = []
+            for name in names:
+                with archive.open(name) as source, tempfile.TemporaryFile() as nested:
+                    shutil.copyfileobj(source, nested)
+                    nested.seek(0)
+                    nested_items.extend(extract(nested, diagnostics))
+            return nested_items
     wb = load_workbook(path_or_file, read_only=True, data_only=True)
     items = []
     for sheet_name in wb.sheetnames:
@@ -394,7 +415,12 @@ def extract(path_or_file):
             raise ValueError(f'{sheet_name}: combined pricing requires 14KDC, 18KDC, 14KSRP and 18KSRP.')
 
         def finish(item):
-            if not item or not item.get('base'):
+            if not item:
+                return
+            if not item.get('base'):
+                diagnostics.append({'severity': 'error', 'issue': 'missing_source_sku',
+                                    'sheet': sheet_name, 'source_row': item.get('source_row'),
+                                    'details': 'Numbered item block has no recognized SR stock number.'})
                 return
             if combined:
                 for karat in ('14K', '18K'):
@@ -425,7 +451,11 @@ def extract(path_or_file):
                 remark_val     = _txt(cell(row, 'remark'))
                 collection_val = _txt(cell(row, 'collection'))
                 cur = {
-                    'sheet': sheet_name, 'purity': purity, 'combined': combined,
+                    'sheet': sheet_name, 'source_row': r + 1, 'purity': purity, 'combined': combined,
+                    'default_color_raw': _txt(cell(row, 'default_color')),
+                    'source_errors': [f'{f}: {_txt(cell(row, f))}' for f in
+                                      ('collection', 'dc', 'srp', '14kdc', '18kdc', '14ksrp', '18ksrp')
+                                      if _txt(cell(row, f)).startswith('#')],
                     'default_color': _metal_color(cell(row, 'default_color')),
                     'variation': _txt(cell(row, 'variation')),
                     'prices': {k: (_num(cell(row, k.lower() + 'dc')),
@@ -436,10 +466,12 @@ def extract(path_or_file):
                     'remark': remark_val or collection_val,
                     'source_collection': collection_val,
                     'source_style': _txt(cell(row, 'source_style')),
+                    'price_raw': {f: _txt(cell(row, f)) for f in
+                                  ('dc', 'srp', '14kdc', '18kdc', '14ksrp', '18ksrp')},
                     'dc':  _num(cell(row, 'dc')),
                     'srp': _num(cell(row, 'srp')),
                     'total_dia': 0.0,
-                    'centers': [], 'sides': [],
+                    'centers': [], 'sides': [], 'unrecognized_stones': [],
                 }
             if cur is None:
                 continue
@@ -455,7 +487,7 @@ def extract(path_or_file):
                 if cand.upper() in ['RING', 'NECKLACE', 'EARRING', 'BRACELET', 'PENDANT', 'BAND']:
                     cur['jtype'] = cand.title()
 
-            # Stone rows
+            # Record unknown positive-weight stone rows instead of silently dropping them.
             pcs   = _num(cell(row, 'pcs'))
             carat = _num(cell(row, 'ct'))
             tk = _toks(desc)
@@ -463,9 +495,15 @@ def extract(path_or_file):
                 rec = {
                     'shape': next((SHAPE_MAP[c] for c in tk if c in SHAPE_MAP), ''),
                     'color': next((COLOR_MAP[c] for c in tk if c in COLOR_MAP), ''),
-                    'pcs': pcs, 'carat': carat,
+                    'pcs': pcs, 'carat': carat, 'description': desc,
                 }
+                if not rec['color']:
+                    cur['unrecognized_stones'].append({'description': desc, 'pcs': pcs,
+                                                       'carat': carat, 'issue': 'unrecognized_color'})
                 (cur['centers'] if tk[:1] == ['CS'] else cur['sides']).append(rec)
+
+            elif pcs > 0 and carat > 0:
+                cur['unrecognized_stones'].append({'description': desc, 'pcs': pcs, 'carat': carat})
 
             # Total Dia. CTS row (anywhere in the row)
             for j, c in enumerate(row):
@@ -476,6 +514,8 @@ def extract(path_or_file):
             finish(cur)
             cur = None
     wb.close()
+    if not items:
+        raise ValueError('No complete MFG items found. Check workbook headers and stock numbers.')
     return items
 
 
@@ -535,6 +575,12 @@ def convert(inputs, image_map=None, collection=DEFAULT_COLLECTION):
     for p in inputs:
         items.extend(extract(p))
 
+    return convert_items(items, image_map, collection)
+
+
+def convert_items(items, image_map=None, collection=DEFAULT_COLLECTION):
+    """Convert already parsed item records (also used by the audit workflow)."""
+    image_map = image_map or {}
     # Group by base; collect purities + per-purity snapshot
     by_base = {}
     for it in items:
@@ -629,6 +675,7 @@ def _run_cli(argv=None):
     ap = argparse.ArgumentParser(description="Convert MFG .xlsx files into VDB-format CSV.")
     ap.add_argument('inputs', nargs='+', help='MFG .xlsx file(s)')
     ap.add_argument('-o', '--output', default='VDB_Output.csv')
+    ap.add_argument('--reference', help='Approved VDB inventory CSV; preserves curated groups and mappings, emits audit ZIP.')
     ap.add_argument('-i', '--images', default=None,
                     help='image-filename list CSV (single column)')
     ap.add_argument('-c', '--collection', default=DEFAULT_COLLECTION,
@@ -645,6 +692,18 @@ def _run_cli(argv=None):
             print("  examples of skipped codes:",
                   ", ".join(f"{c!r} ({fn})" for c, fn in top))
 
+    if a.reference:
+        from pathlib import Path
+        from inventory_reconcile import build_inventory, audit_zip
+        df, reports = build_inventory(a.inputs, a.reference, imap)
+        df.to_csv(a.output, index=False)
+        audit_path = Path(a.output).with_suffix('.audit.zip')
+        audit_path.write_bytes(audit_zip(df, reports))
+        print(reports['summary'])
+        print(f'Review inventory: {a.output}; audit reports: {audit_path}')
+        if reports['summary']['blocking_issues']:
+            raise SystemExit(2)
+        return
     df, unknown = convert(a.inputs, imap, collection=a.collection)
     df.to_csv(a.output, index=False)
     print(f"Wrote {len(df)} rows -> {a.output}")
@@ -720,8 +779,8 @@ if _running_under_streamlit():
     with col_l:
         st.subheader("1. MFG file(s)")
         mfg_files = st.file_uploader(
-            "Client quotation workbook (.xlsx). Multiple files OK.",
-            type=["xlsx"],
+            "Client quotation workbook (.xlsx or .xlsx.zip). Multiple files OK.",
+            type=["xlsx", "zip"],
             accept_multiple_files=True,
             key="mfg",
         )
@@ -733,6 +792,12 @@ if _running_under_streamlit():
             accept_multiple_files=False,
             key="images",
         )
+
+    reference_file = st.file_uploader(
+        "3. Approved VDB inventory CSV (recommended for full inventory updates)", type=["csv"],
+        key="reference_inventory", help="Preserves existing master groups, variations, collection/style mappings, "
+        "center/side details and images. Client prices and default masters are reconciled with audit reports.",
+    )
 
     # ---- convert ----
     disabled = not mfg_files
@@ -755,12 +820,19 @@ if _running_under_streamlit():
         try:
             inputs = [io.BytesIO(f.getvalue()) for f in mfg_files]
             with st.spinner("Parsing MFG sheets and building VDB rows…"):
-                df, unknown = convert(inputs, image_map, collection=collection)
+                reports = None
+                if reference_file is not None:
+                    from inventory_reconcile import build_inventory
+                    df, reports = build_inventory(inputs, io.BytesIO(reference_file.getvalue()), image_map)
+                    unknown = set()
+                else:
+                    df, unknown = convert(inputs, image_map, collection=collection)
         except Exception as e:
             st.error(f"Conversion failed: {e}")
             st.stop()
 
         # cache so previews/downloads survive UI reruns
+        st.session_state["inventory_audit"] = reports
         st.session_state["result_df"]  = df
         st.session_state["unknown"]    = sorted(unknown)
         st.session_state["img_stats"]  = img_stats
@@ -777,6 +849,11 @@ if _running_under_streamlit():
 
         st.markdown("---")
         st.subheader("Results")
+        reports = st.session_state.get("inventory_audit")
+        needs_review = bool(reports and reports['summary']['blocking_issues'])
+        if reports:
+            from inventory_reconcile import render_audit
+            render_audit(st, df, reports, key='standalone_audit_download')
 
         # stats cards
         unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]+$", "", regex=True).nunique()
@@ -837,9 +914,9 @@ if _running_under_streamlit():
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         fname_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", coll_used) or "VDB"
         st.download_button(
-            "⬇️ Download VDB CSV",
+            "Download review CSV" if needs_review else "⬇️ Download VDB CSV",
             data=csv_bytes,
-            file_name=f"VDB_{fname_slug}_Output.csv",
+            file_name=f"VDB_{fname_slug}_{'Review' if needs_review else 'Output'}.csv",
             mime="text/csv",
             type="primary",
             use_container_width=True,

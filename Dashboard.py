@@ -255,8 +255,8 @@ def smiling_rocks_converter() -> None:
     with col_l:
         st.subheader("1. MFG file(s)")
         mfg_files = st.file_uploader(
-            "Client quotation workbook (.xlsx). Multiple files allowed.",
-            type=["xlsx"],
+            "Client quotation workbook (.xlsx or .xlsx.zip). Multiple files allowed.",
+            type=["xlsx", "zip"],
             accept_multiple_files=True,
             key="dashboard_mfg_files",
         )
@@ -268,6 +268,12 @@ def smiling_rocks_converter() -> None:
             accept_multiple_files=False,
             key="dashboard_img_file",
         )
+
+    reference_file = st.file_uploader(
+        "3. Approved VDB inventory CSV (recommended for full inventory updates)",
+        type=["csv"], key="dashboard_reference_inventory",
+        help="Preserves curated groups, variations, styles and stone details; audits source changes.",
+    )
 
     run = st.button(
         "Convert to VDB CSV",
@@ -291,11 +297,18 @@ def smiling_rocks_converter() -> None:
         try:
             inputs = [io.BytesIO(f.getvalue()) for f in mfg_files]
             with st.spinner("Parsing MFG sheets and building VDB rows..."):
-                df, unknown = core.convert(inputs, image_map, collection=collection)
+                reports = None
+                if reference_file is not None:
+                    from inventory_reconcile import build_inventory
+                    df, reports = build_inventory(inputs, io.BytesIO(reference_file.getvalue()), image_map)
+                    unknown = set()
+                else:
+                    df, unknown = core.convert(inputs, image_map, collection=collection)
         except Exception as exc:
             st.error(f"Conversion failed: {exc}")
             st.stop()
 
+        st.session_state["sr_inventory_audit"] = reports
         st.session_state["sr_result_df"] = df
         st.session_state["sr_unknown"] = sorted(unknown)
         st.session_state["sr_img_stats"] = img_stats
@@ -313,6 +326,11 @@ def smiling_rocks_converter() -> None:
 
     st.markdown("---")
     st.subheader("Results")
+    reports = st.session_state.get("sr_inventory_audit")
+    needs_review = bool(reports and reports['summary']['blocking_issues'])
+    if reports:
+        from inventory_reconcile import render_audit
+        render_audit(st, df, reports, key='dashboard_audit_download')
 
     unique_styles = df["Stock Number"].str.replace(r"-..K[WYR]+$", "", regex=True).nunique() if "Stock Number" in df else 0
     rows_with_img = (df["Image Url 1"] != "").sum() if "Image Url 1" in df else 0
@@ -351,9 +369,9 @@ def smiling_rocks_converter() -> None:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     fname_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", coll_used) or "VDB"
     st.download_button(
-        "⬇️ Download VDB CSV",
+        "Download review CSV" if needs_review else "⬇️ Download VDB CSV",
         data=csv_bytes,
-        file_name=f"VDB_{fname_slug}_Output.csv",
+        file_name=f"VDB_{fname_slug}_{'Review' if needs_review else 'Output'}.csv",
         mime="text/csv",
         type="primary",
         use_container_width=True,

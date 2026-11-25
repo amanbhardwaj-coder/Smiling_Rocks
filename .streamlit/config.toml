@@ -1,0 +1,3 @@
+[server]
+# Full client workbooks contain embedded photos and can exceed 350 MB.
+maxUploadSize = 800

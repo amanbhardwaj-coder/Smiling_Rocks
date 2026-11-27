@@ -4,21 +4,24 @@ Run `streamlit run app.py` or `streamlit run Dashboard.py`.
 
 ## Confirmation workbook + image CSV (normal workflow)
 
-Upload the client XLSX or XLSX ZIP and the image filename CSV. No reference inventory upload is required when the workbook contains the five confirmation columns:
+Upload the client XLSX or XLSX ZIP and the image filename CSV. No reference inventory upload is required when the workbook contains the confirmation columns:
 
 - COLLECTION NAME (the main group)
 - Style Name
 - Variations (Yes / No)
 - Variation Styles (comma-separated base stock numbers belonging to one product)
 - Variation Columns (ordered selectable attributes)
+- Available Metals (comma-separated colors, e.g. White, Yellow, Rose or White Yellow, White Rose)
 
-The confirmation columns are auto-detected even when the original COLLECTION NAME column is also present. All member styles must contain the same group definition. Default metal color must be consistent across the group. Prices come from the uploaded DC/SRP columns; combined 14K-18K pricing takes priority.
+The confirmation columns are auto-detected even when the original COLLECTION NAME column is also present. All present member styles must contain the same Variation Styles membership and ordered Variation Columns. Each style may have its own default metal color. Prices come from the uploaded DC/SRP columns; combined 14K-18K pricing takes priority.
 
-The tool creates one master for each confirmed style group, preferring an existing approved parent at 14K in the default color. If the old groups are intentionally combined, the first declared eligible style becomes the parent. Available options are derived from actual generated variants in the order specified by Variation Columns (parent to child).
+The tool creates both 14K and 18K variants for each explicitly listed color, using uploaded prices for each karat. Two-tone names such as White Yellow represent a single color option. Image filenames do not determine available colors. Both karat prices must be supplied. Old templates without Available Metals use approved saved metal names as a compatibility fallback.
+
+The tool creates one master per Variation Styles group. It selects the first listed eligible style and its 14K variant matching that style’s existing default metal color. Different defaults across member styles are allowed. Missing group members are reported for later addition; conflicting membership among present styles is an error. Available options are derived from actual generated variants in the order specified by Variation Columns (parent to child).
 
 Supported names include Metal, Shape, Carat Weight, Center Carat Weight, Stone Color, Ring Size and Length. Metal includes karat and color. A No instruction must have no varying attributes. Existing size/length policies and curated stone/taxonomy conventions are stored privately in the client template's hidden _VDB_Rules worksheet, without prices or image URLs. The repository contains only a loader, never the private inventory catalogue. Keep that hidden sheet when editing the supplied template. An optional server-only SMILING_ROCKS_RULES_FILE setting can point to a private rule file. Exact-color images come from the supplied CSV, including WY/WR/YR codes with or without numeric suffixes.
 
-Saved catalogue rules retain known classification, stone assignments, titles, barcodes and sizing policies. The client workbook overrides grouping and always supplies prices. New or conflicting metadata, incomplete groups, missing size policies or inconsistent defaults generate actionable review reports. The tool does not silently invent missing instructions. New designs without explicit center markers may need center/side review.
+Saved catalogue rules retain known classification, stone assignments, titles, barcodes and sizing policies. The client workbook overrides grouping and always supplies prices. New or conflicting metadata, missing color lists, missing karat prices or missing size policies generate actionable review reports. Missing images remain blank with a warning. The tool does not silently invent missing instructions. New designs without explicit center markers may need center/side review.
 
 The legacy reference CSV input remains optional for old workbooks without the five columns.
 

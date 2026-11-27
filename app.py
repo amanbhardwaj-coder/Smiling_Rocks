@@ -276,6 +276,11 @@ def load_image_map(path_or_file):
             skip_samples.setdefault(code, fn)
             continue
         C = m.group(1).upper()
+        if len(set(C)) != len(C):
+            skipped += 1
+            skip_samples.setdefault(code, fn)
+            continue
+        C = ''.join(c for c in 'WYR' if c in C)
         idx = int(m.group(2) or 0)
         tmp.setdefault((base.upper(), C), []).append((idx, fn))
         accepted += 1
@@ -315,6 +320,7 @@ _HEADER_ALIASES = {
     'declared_variation': ('variationsyesno',),
     'group_styles': ('variationstyles',),
     'variation_columns': ('variationcolumns',),
+    'available_metals': ('availablemetals', 'availablemetalcolors', 'metalcolors'),
 }
 
 def _find_header(rows, max_scan=80):
@@ -460,11 +466,13 @@ def extract(path_or_file, diagnostics=None):
                 cur = {
                     'sheet': sheet_name, 'source_row': r + 1, 'purity': purity, 'combined': combined,
                     'instructions_present': 'declared_collection' in idx,
+                    'available_metals_present': 'available_metals' in idx,
                     'instructions': {'collection': _txt(cell(row,'declared_collection')),
                                      'style': _txt(cell(row,'declared_style')),
                                      'variation': _txt(cell(row,'declared_variation')),
                                      'styles': _txt(cell(row,'group_styles')),
-                                     'columns': _txt(cell(row,'variation_columns'))},
+                                     'columns': _txt(cell(row,'variation_columns')),
+                                     'available_metals': _txt(cell(row,'available_metals'))},
                     'default_color_raw': _txt(cell(row, 'default_color')),
                     'source_errors': [f'{f}: {_txt(cell(row, f))}' for f in
                                       ('collection', 'dc', 'srp', '14kdc', '18kdc', '14ksrp', '18ksrp')

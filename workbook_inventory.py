@@ -1,4 +1,4 @@
-"""Build VDB inventory from the five confirmation fields plus an image list.
+"""Build VDB inventory from the confirmation fields plus an image list.
 
 Saved approved rules supply previously curated stone/taxonomy/size conventions;
 no reference CSV, prices or image URLs are required from that saved catalogue.
@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 import re
 import pandas as pd
 from saved_inventory_rules import load_rules
+from metal_colors import parse_colors, parse_color, COLOR_NAMES
 
 DIMENSIONS = {
     'metal': ('Metal','Available Metals'),
@@ -64,11 +65,24 @@ def build_from_items(items, image_map=None, diagnostics=None, rules=None):
         selected[key]=preferred[0]
     by_base=defaultdict(list)
     for (base,purity),item in selected.items():by_base[base].append(item)
-    groups=defaultdict(list);declared={};member_orders={}
+    groups=defaultdict(list);declared={};member_orders={};colors_by_base={};defaults_by_base={}
     for base,records in by_base.items():
-        signatures=[]
+        signatures=[]; color_sets=[];defaults=[]
         for item in records:
             raw=item.get('instructions',{})
+            try:
+                if item.get('available_metals_present'):
+                    colors=parse_colors(raw.get('available_metals',''))
+                    if not colors:
+                        issue('error','missing_available_metals',base,'Fill Available Metals with the offered color names.');continue
+                else:
+                    # Compatibility for old templates: approved values only, never image filenames.
+                    colors=tuple(dict.fromkeys(parse_color(p['Metal']) for p in profiles_by_base.get(base,[]) if p.get('Metal')))
+                    if not colors:colors=(parse_color(item.get('default_color_raw') or item.get('default_color')), )
+                color_sets.append(frozenset(colors))
+                if item.get('default_color_raw'):defaults.append((item['purity'],parse_color(item['default_color_raw'])))
+            except ValueError as error:
+                issue('error','invalid_metal_color',base,str(error));continue
             collection=str(raw.get('collection','')).strip();style=str(raw.get('style','')).strip()
             known_labels={_key(v) for v in rules.get('source_labels',{}).get(base,[])}
             styles={p.get('Jewelry Style','') for p in profiles_by_base.get(base,[])}-{''}
@@ -89,31 +103,49 @@ def build_from_items(items, image_map=None, diagnostics=None, rules=None):
             member_orders.setdefault(base,tuple(members))
             signature=(collection,style,flag,tuple(sorted(members)),tuple(columns))
             signatures.append(signature)
+        if len(color_sets)!=len(records) or len(set(color_sets))!=1:
+            issue('error','inconsistent_available_metals_between_purities',base,'Use the same Available Metals colors on 14K and 18K records.');continue
+        if not defaults:
+            issue('error','missing_default_metal',base,'Fill the existing default metal column for this style.');continue
+        colors_by_base[base]=tuple(sorted(next(iter(set(color_sets)))))
+        default_records=sorted(defaults,key=lambda p:p[0]!='14K')
+        defaults_by_base[base]=default_records[0][1]
+        if len({c for _,c in defaults})>1:
+            issue('warning','purity_default_color_difference',base,'14K default color is used for the 14K master candidate.')
         if len(signatures)!=len(records) or len(set(signatures))!=1:
             if signatures:issue('error','inconsistent_instructions_between_purities',base,'Use the same five fields on 14K and 18K records.')
             continue
         signature=signatures[0];declared[base]=signature;groups[signature[3]].append(base)
     output=[]
     for members,bases in groups.items():
-        if set(members)!=set(bases):
-            issue('error','incomplete_or_overlapping_variation_group',','.join(bases),'Missing/inconsistent instructions for: '+','.join(sorted(set(members)-set(bases))));continue
-        definitions={declared[b] for b in bases}
+        inconsistent=[b for b in members if b in declared and declared[b][3]!=members]
+        if inconsistent:
+            issue('error','conflicting_group_membership',','.join(bases),'Use the same Variation Styles list on all present group members: '+','.join(inconsistent));continue
+        missing=set(members)-set(bases)
+        if missing:
+            issue('warning','group_members_deferred',','.join(bases),'These styles can be added later: '+','.join(sorted(missing)))
+        # Same membership list defines the product group. Labels/defaults may
+        # differ per style; only the ordered dependency list must agree.
+        definitions={declared[b][4] for b in bases}
         if len(definitions)!=1:
-            issue('error','group_metadata_conflict',','.join(bases),'All linked styles must use identical collection, style, Yes/No and ordered variation columns.');continue
-        collection,style,flag,_,columns=next(iter(definitions))
-        members=member_orders[bases[0]]
+            issue('error','group_variation_columns_conflict',','.join(bases),'Use the same ordered Variation Columns within a shared group.');continue
+        columns=next(iter(definitions))
+        members=tuple(b for b in member_orders[bases[0]] if b in bases)
         records=[i for b in members for i in by_base[b]]
-        defaults={i.get('default_color') for i in records if i.get('default_color_raw')}
-        if len(defaults)!=1:
-            issue('error','group_default_color_conflict',','.join(bases),'Provide one consistent default metal color for the shared product group.');continue
-        default=next(iter(defaults))
-        if any(_number(i.get(f)) is None or _number(i.get(f))<=0 for i in records for f in ['dc','srp']):
+        collection,style=declared[members[0]][:2]
+        invalid_prices=[i for i in records if any(_number(i.get(f)) is None or _number(i.get(f))<=0 for f in ['dc','srp'])]
+        if invalid_prices:
             issue('error','invalid_client_prices',','.join(bases),'DC and SRP must be positive numeric values for every style/purity.');continue
         group_rows=[]
         for base in members:
-            saved_colors={m[1] for p in profiles_by_base.get(base,[]) if (m:=re.search(r'-(?:14K|18K)([WYR]{1,3})$',p['Stock Number']))}
-            supplied_colors={color for b,color in image_map if b==base}
-            colors=sorted(saved_colors|supplied_colors|{default}) if 'metal' in columns else [default]
+            collection,style=declared[base][:2]
+            default=defaults_by_base[base]
+            colors=colors_by_base[base]
+            purities={i['purity'] for i in by_base[base]}
+            if any(i.get('available_metals_present') for i in by_base[base]) and purities!={'14K','18K'}:
+                issue('error','missing_karat_prices',base,'Both 14K and 18K prices are required; absent prices are not invented.')
+            if default not in colors:
+                issue('error','default_color_not_available',base,'The existing default color is not listed in Available Metals.')
             for item in sorted(by_base[base],key=lambda x:x['purity']):
                 draft_item=dict(item,variation='NO')
                 draft,_=core.convert_items([draft_item],image_map,collection='Auto')
@@ -169,13 +201,20 @@ def build_from_items(items, image_map=None, diagnostics=None, rules=None):
                     for field in ['Config Field 13','Jewelry Style','Config Field 14','Tags']:
                         if not row.get(field):issue('error','missing_classification',sku,field)
                     group_rows.append(row)
-        candidates=[r['Stock Number'] for r in group_rows if r['Stock Number'].endswith('-14K'+default)]
-        approved={p.get('Master Stock','') for b in members for p in profiles_by_base.get(b,[])}
-        preferred_bases={_sku_base(s) for s in approved}
-        preferred=[s for s in candidates if _sku_base(s) in preferred_bases]
-        master=sorted(preferred)[0] if len(preferred)==1 else candidates[0] if candidates else group_rows[0]['Stock Number']
-        if not candidates:issue('warning','no_14k_master_available',master,'No uploaded 14K variant exists; first available variant used.')
-        for row in group_rows:row['Master Stock']=master
+        # Any listed style can be the parent. Pick the first listed style
+        # having an uploaded 14K variant in its own existing default color.
+        master='';master_style='';master_default=''
+        generated_skus={r['Stock Number'] for r in group_rows}
+        for base in members:
+            candidate=f"{base}-14K{defaults_by_base[base]}"
+            if candidate in generated_skus:
+                master,master_style,master_default=candidate,base,defaults_by_base[base]
+                break
+        if not master:
+            issue('error','no_14k_default_master',','.join(members),'No listed style has a generated 14K variant in its default color.');continue
+        for row in group_rows:
+            row['Master Stock']=master
+            row['Default Metal (MASTER STOCK)']=COLOR_NAMES[master_default]+' Gold'
         # Ordered columns define parent-to-child option dependencies.
         parents=[]
         for name in columns:
@@ -207,8 +246,8 @@ def build_from_items(items, image_map=None, diagnostics=None, rules=None):
                 availability_trace.append(dict(master_stock=master,column=available,source_column=field or 'saved size/length policy',
                                                options=value,rows=count,declared_order=','.join(columns)))
         traces.append(dict(master_stock=master,variation_styles=','.join(members),collection=collection,style=style,
-                           variation_columns=','.join(columns),default_color=default,variants=len(group_rows),
-                           rule='Confirmed group; approved parent when unique, otherwise first declared available 14K default-color variant.'))
+                           variation_columns=','.join(columns),master_style=master_style,default_color=master_default,variants=len(group_rows),
+                           rule='First listed style having an available 14K variant in its own default metal color.'))
         output.extend(group_rows)
     columns=list(core.COLUMNS)+['Default Metal (MASTER STOCK)','Best Selling Items ']
     df=pd.DataFrame(output).reindex(columns=columns).fillna('')
